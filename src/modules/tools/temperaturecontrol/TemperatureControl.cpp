@@ -407,10 +407,11 @@ uint32_t TemperatureControl::thermistor_read_tick(uint32_t dummy)
     }
 
     if (target_temperature > 0) {
-        if (isinf(temperature) || temperature < min_temp) {
+        if (isinf(temperature) || temperature < min_temp || temperature < -20 || temperature > 350) {
             this->min_temp_violated = true;
             target_temperature = UNDEFINED;
             heater_pin.set((this->o = 0));
+            THEKERNEL->call_event(ON_HALT, nullptr);
         } else {
             pid_process(temperature);
         }
