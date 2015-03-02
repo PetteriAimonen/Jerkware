@@ -147,12 +147,7 @@ void Stepper::on_block_begin(void *argument)
     // Mark the new block as of interrest to us, handle blocks that have no axis moves properly (like Extrude blocks etc)
     if(block->millimeters > 0.0F && (block->steps[ALPHA_STEPPER] > 0 || block->steps[BETA_STEPPER] > 0 || block->steps[GAMMA_STEPPER] > 0) ) {
         block->take();
-
     } else {
-        // none of the steppers move this block so make sure they know that
-        for(auto a : THEKERNEL->robot->actuators) {
-            a->set_moved_last_block(false);
-        }
         return;
     }
 
@@ -160,31 +155,25 @@ void Stepper::on_block_begin(void *argument)
     if( this->enable_pins_status == false ) {
         this->turn_enable_pins_on();
     }
-
+    
     // Setup : instruct stepper motors to move
     // Find the stepper with the more steps, it's the one the speed calculations will want to follow
     this->main_stepper= nullptr;
     if( block->steps[ALPHA_STEPPER] > 0 ) {
-        THEKERNEL->robot->alpha_stepper_motor->move( block->direction_bits[ALPHA_STEPPER], block->steps[ALPHA_STEPPER])->set_moved_last_block(true);
+        THEKERNEL->robot->alpha_stepper_motor->move( block->direction_bits[ALPHA_STEPPER], block->steps[ALPHA_STEPPER]);
         this->main_stepper = THEKERNEL->robot->alpha_stepper_motor;
-    }else{
-        THEKERNEL->robot->alpha_stepper_motor->set_moved_last_block(false);
     }
 
     if( block->steps[BETA_STEPPER ] > 0 ) {
-        THEKERNEL->robot->beta_stepper_motor->move(  block->direction_bits[BETA_STEPPER], block->steps[BETA_STEPPER ])->set_moved_last_block(true);
+        THEKERNEL->robot->beta_stepper_motor->move(  block->direction_bits[BETA_STEPPER], block->steps[BETA_STEPPER ]);
         if(this->main_stepper == nullptr || THEKERNEL->robot->beta_stepper_motor->get_steps_to_move() > this->main_stepper->get_steps_to_move())
             this->main_stepper = THEKERNEL->robot->beta_stepper_motor;
-    }else{
-        THEKERNEL->robot->beta_stepper_motor->set_moved_last_block(false);
     }
 
     if( block->steps[GAMMA_STEPPER] > 0 ) {
-        THEKERNEL->robot->gamma_stepper_motor->move( block->direction_bits[GAMMA_STEPPER], block->steps[GAMMA_STEPPER])->set_moved_last_block(true);
+        THEKERNEL->robot->gamma_stepper_motor->move( block->direction_bits[GAMMA_STEPPER], block->steps[GAMMA_STEPPER]);
         if(this->main_stepper == nullptr || THEKERNEL->robot->gamma_stepper_motor->get_steps_to_move() > this->main_stepper->get_steps_to_move())
             this->main_stepper = THEKERNEL->robot->gamma_stepper_motor;
-    }else{
-        THEKERNEL->robot->gamma_stepper_motor->set_moved_last_block(false);
     }
 
     this->current_block = block;
@@ -213,8 +202,8 @@ void Stepper::on_block_end(void *argument)
 // When a stepper motor has finished it's assigned movement
 uint32_t Stepper::stepper_motor_finished_move(uint32_t dummy)
 {
-    // We care only if none is still moving
-    if( THEKERNEL->robot->alpha_stepper_motor->moving || THEKERNEL->robot->beta_stepper_motor->moving || THEKERNEL->robot->gamma_stepper_motor->moving ) {
+    // We care only if all motors are finished
+    if (!(THEKERNEL->robot->alpha_stepper_motor->is_move_finished && THEKERNEL->robot->beta_stepper_motor->is_move_finished && THEKERNEL->robot->gamma_stepper_motor->is_move_finished)) {
         return 0;
     }
 
@@ -223,6 +212,15 @@ uint32_t Stepper::stepper_motor_finished_move(uint32_t dummy)
         this->current_block->release();
     }
 
+    // Stop predictive steps for motors that aren't used in the new block.
+    for (StepperMotor *m : THEKERNEL->robot->actuators)
+    {
+        if (m->moving && m->is_move_finished)
+        {
+            m->move(false, 0);
+        }
+    }
+    
     return 0;
 }
 

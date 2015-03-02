@@ -32,7 +32,6 @@ class StepperMotor {
         StepperMotor* move( bool direction, unsigned int steps, float initial_speed= -1.0F);
         void signal_move_finished();
         StepperMotor* set_speed( float speed );
-        void set_moved_last_block(bool flg) { last_step_tick_valid= flg; }
         void update_exit_tick();
         void pause();
         void unpause();
@@ -85,7 +84,6 @@ class StepperMotor {
 
         uint32_t steps_to_move;
         uint32_t stepped;
-        uint32_t last_step_tick;
         uint32_t signal_step;
 
         // set to 32 bit fixed point, 18:14 bits fractional
@@ -99,7 +97,7 @@ class StepperMotor {
             volatile bool is_move_finished:1; // Whether the move just finished
             bool paused:1;
             volatile bool moving:1;
-            bool last_step_tick_valid:1; // set if the last step tick time is valid (ie the motor moved last block)
+            volatile bool keep_moving:1;
         };
 
         // Called a great many times per second, to step if we have to now

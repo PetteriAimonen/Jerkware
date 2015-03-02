@@ -43,10 +43,8 @@ void StepperMotor::init()
     this->fx_ticks_per_step = 0xFFFFF000UL; // some big number so we don't start stepping before it is set
     this->stepped = 0;
     this->steps_to_move = 0;
-    this->is_move_finished = false;
-    this->last_step_tick_valid= false;
-    this->last_step_tick= 0;
-
+    this->is_move_finished = true; // No move initially => same as finished
+    
     steps_per_mm         = 1.0F;
     max_rate             = 50.0F;
     minimum_step_rate    = default_minimum_actuator_rate;
@@ -63,9 +61,6 @@ void StepperMotor::init()
 // This is in highest priority interrupt so cannot be pre-empted
 void StepperMotor::step()
 {
-    // ignore if we are still processing the end of a block
-    if(this->is_move_finished) return;
-
     // output to pins 37t
     this->step_pin.set( 1 );
 
@@ -78,19 +73,32 @@ void StepperMotor::step()
     // keep track of actuators actual position in steps
     this->current_position_steps += (this->direction ? -1 : 1);
 
-    // we may need to callback on a specific step, usually used to synchronize deceleration timer
-    if(this->signal_step != 0 && this->stepped == this->signal_step) {
-        THEKERNEL->step_ticker->synchronize_acceleration(true);
-        this->signal_step= 0;
-    }
+    if (!this->is_move_finished)
+    {
+        // we may need to callback on a specific step, usually used to synchronize deceleration timer
+        if(this->signal_step != 0 && this->stepped == this->signal_step) {
+            THEKERNEL->step_ticker->synchronize_acceleration(true);
+            this->signal_step= 0;
+        }
 
-    // Is this move finished ?
-    if( this->stepped == this->steps_to_move ) {
-        // Mark it as finished, then StepTicker will call signal_mode_finished()
-        // This is so we don't call that before all the steps have been generated for this tick()
-        this->is_move_finished = true;
-        THEKERNEL->step_ticker->a_move_finished= true;
-        this->last_step_tick= THEKERNEL->step_ticker->get_tick_cnt(); // remember when last step was
+        // Is this move finished ?
+        if( this->stepped == this->steps_to_move ) {
+            // Mark it as finished, then StepTicker will call signal_mode_finished()
+            // This is so we don't call that before all the steps have been generated for this tick()
+            // The stepper will keep moving at current speed while the new block is being set up.
+            // These extra steps will be counted in this->stepped and taken into account in next move.
+            this->is_move_finished = true;
+            this->stepped = 0;
+            THEKERNEL->step_ticker->a_move_finished= true;
+            
+            if (this->keep_moving)
+                ITM->PORT[this->index].u8 = 'F';
+            else
+                ITM->PORT[this->index].u8 = 'S';
+            
+            if (!this->keep_moving)
+                this->moving = false;
+        }
     }
 }
 
@@ -99,8 +107,6 @@ void StepperMotor::step()
 void StepperMotor::signal_move_finished()
 {
     // work is done ! 8t
-    this->moving = false;
-    this->steps_to_move = 0;
     this->minimum_step_rate = default_minimum_actuator_rate;
 
     // signal it to whatever cares
@@ -111,8 +117,6 @@ void StepperMotor::signal_move_finished()
     if( !this->moving ) {
         this->update_exit_tick();
     }
-
-    this->is_move_finished = false;
 }
 
 // This is just a way not to check for ( !this->moving || this->paused || this->fx_ticks_per_step == 0 ) at every tick()
@@ -121,6 +125,7 @@ void StepperMotor::update_exit_tick()
     if( !this->moving || this->paused || this->steps_to_move == 0 ) {
         // No more ticks will be recieved and no more events from StepTicker
         THEKERNEL->step_ticker->remove_motor_from_active_list(this);
+        this->fx_counter = 0;
     } else {
         // we will now get ticks and StepTIcker will send us events
         THEKERNEL->step_ticker->add_motor_to_active_list(this);
@@ -130,36 +135,56 @@ void StepperMotor::update_exit_tick()
 // Instruct the StepperMotor to move a certain number of steps
 StepperMotor* StepperMotor::move( bool direction, unsigned int steps, float initial_speed)
 {
+    // Disable irqs to prevent steps while we change values
+    __disable_irq();
+    
+    // Keep moving after this block ends?
+    this->keep_moving = (steps > 0);
+    
+    // Take into account any predicted steps that were taken between previous move end and
+    // the call of this function.
+    if (this->stepped > 0)
+    {
+        if (direction != this->direction)
+        {
+            // Direction has changed and the predicted steps overshot slightly.
+            // Usually just 0-1 steps as speed is near zero at turning points.
+            steps += this->stepped;
+        }
+        else if (steps < this->stepped)
+        {
+            // Shouldn't happen usually, predicted move overshot the actual move
+            direction = !direction;
+            steps = this->stepped - steps;
+        }
+        else
+        {
+            // This is the normal case, predicted move correctly
+            steps -= this->stepped;
+        }
+    }
+    
+    ITM->PORT[this->index].u32 = steps;
+    
+    // Initialize for new move
     this->dir_pin.set(direction);
     this->direction = direction;
-
-    // How many steps we have to move until the move is done
     this->steps_to_move = steps;
-
-    // Zero our tool counters
     this->stepped = 0;
-    this->fx_ticks_per_step = 0xFFFFF000UL; // some big number so we don't start stepping before it is set again
-    if(this->last_step_tick_valid) {
-        // we set this based on when the last step was, thus compensating for missed ticks
-        uint32_t ts= THEKERNEL->step_ticker->ticks_since(this->last_step_tick);
-        // if an axis stops too soon then we can get a huge number of ticks here which causes problems, so if the number of ticks is too great we ignore them
-        // example of when this happens is when one axis is going very slow an the min 20steps/sec kicks in, the axis will reach its target much sooner leaving a long gap
-        // until the end of the block.
-        // TODO we may need to set this based on the current step rate, trouble is we don't know what that is yet, we could use the last fx_ticks_per_step as a guide
-        if(ts > 5) ts= 5; // limit to 50us catch up around 1-2 steps
-        else if(ts > 15) ts= 0; // no way to know what the delay was
-        this->fx_counter= ts*fx_increment;
-    }else{
-        this->fx_counter = 0; // set to zero as there was no step last block
-    }
-
-    // Starting now we are moving
+    
+    // Set initial speed for new move
     if( steps > 0 ) {
         if(initial_speed >= 0.0F) set_speed(initial_speed);
         this->moving = true;
+        this->is_move_finished = false;
     } else {
         this->moving = false;
+        this->is_move_finished = true;
     }
+    
+    // Movement may start now
+    __enable_irq();
+    
     this->update_exit_tick();
     return this;
 }
@@ -182,9 +207,14 @@ StepperMotor* StepperMotor::set_speed( float speed )
 
     // How many steps we must output per second
     this->steps_per_second = speed;
-
-    // set the new speed, NOTE this can be pre-empted by stepticker so the following write needs to be atomic
-    this->fx_ticks_per_step= floor(fx_increment * THEKERNEL->step_ticker->get_frequency() / speed);
+    
+    uint32_t tmp = floorf(fx_increment * THEKERNEL->step_ticker->get_frequency() / speed);
+    __disable_irq();
+    // Allow up to 1 queued step when changing movement speed
+    if (this->fx_counter > tmp) this->fx_counter = tmp;
+    this->fx_ticks_per_step = tmp;
+    __enable_irq();
+    
     return this;
 }
 

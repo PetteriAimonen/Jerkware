@@ -494,7 +494,6 @@ void Extruder::on_block_begin(void *argument)
 
     if( this->mode == OFF ) {
         this->current_block = NULL;
-        this->stepper_motor->set_moved_last_block(false);
         return;
     }
 
@@ -525,17 +524,14 @@ void Extruder::on_block_begin(void *argument)
 
         if(this->mode == FOLLOW) {
             on_speed_change(this); // set initial speed
-            this->stepper_motor->set_moved_last_block(true);
         }else{
             // SOLO
             this->stepper_motor->set_speed(rate_increase());  // start at first acceleration step
-            this->stepper_motor->set_moved_last_block(false);
         }
 
     } else {
         // no steps to take this time
         this->current_block = NULL;
-        this->stepper_motor->set_moved_last_block(false);
     }
 
 }
