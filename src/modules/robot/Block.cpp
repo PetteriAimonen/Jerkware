@@ -117,12 +117,19 @@ void Block::calculate_trapezoid( float entryspeed, float exitspeed )
     // Is the Plateau of Nominal Rate smaller than nothing? That means no cruising, and we will
     // have to use intersection_distance() to calculate when to abort acceleration and start braking
     // in order to reach the final_rate exactly at the end of this block.
-    if (plateau_steps < 0) {
+    if (plateau_steps < 0)
+    {
         accelerate_steps = ceilf(this->intersection_distance(this->initial_rate, this->final_rate, acceleration_per_second, this->steps_event_count));
         accelerate_steps = max( accelerate_steps, 0 ); // Check limits due to numerical round-off
         accelerate_steps = min( accelerate_steps, int(this->steps_event_count) );
+        max_rate = this->max_allowable_speed(-acceleration_per_second, this->final_rate, this->steps_event_count - this->decelerate_after);
         plateau_steps = 0;
     }
+    else
+    {
+        max_rate = nominal_rate;
+    }
+    
     this->accelerate_until = accelerate_steps;
     this->decelerate_after = accelerate_steps + plateau_steps;
 

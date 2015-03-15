@@ -52,6 +52,7 @@ class Block {
         float          acceleration;       // the acceleratoin for this block
         unsigned int   initial_rate;       // Initial speed in steps per second
         unsigned int   final_rate;         // Final speed in steps per second
+        unsigned int   max_rate;           // Maximum rate during the move, <= nominal_rate
         unsigned int   accelerate_until;   // Stop accelerating after this number of steps
         unsigned int   decelerate_after;   // Start decelerating after this number of steps
 

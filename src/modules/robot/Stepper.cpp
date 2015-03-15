@@ -30,13 +30,11 @@ using namespace std;
 #include <mri.h>
 
 // The stepper reacts to blocks that have XYZ movement to transform them into actual stepper motor moves
-// TODO: This does accel, accel should be in StepperMotor
 
 Stepper::Stepper()
 {
     this->current_block = NULL;
     this->paused = false;
-    this->force_speed_update = false;
     this->halted= false;
 }
 
@@ -147,12 +145,10 @@ void Stepper::on_block_begin(void *argument)
     // Mark the new block as of interrest to us, handle blocks that have no axis moves properly (like Extrude blocks etc)
     if(block->millimeters > 0.0F && (block->steps[ALPHA_STEPPER] > 0 || block->steps[BETA_STEPPER] > 0 || block->steps[GAMMA_STEPPER] > 0) ) {
         block->take();
-
     } else {
-        // none of the steppers move this block so make sure they know that
-        for(auto a : THEKERNEL->robot->actuators) {
-            a->set_moved_last_block(false);
-        }
+        THEKERNEL->robot->alpha_stepper_motor->move(0, 0);
+        THEKERNEL->robot->beta_stepper_motor->move(0, 0);
+        THEKERNEL->robot->gamma_stepper_motor->move(0, 0);
         return;
     }
 
@@ -160,31 +156,44 @@ void Stepper::on_block_begin(void *argument)
     if( this->enable_pins_status == false ) {
         this->turn_enable_pins_on();
     }
-
+    
+    // If the block end speed is more larger than acceleration delta, keep moving
+    // between blocks to avoid jerks.
+    bool keep_moving = (block->final_rate > block->rate_delta);
+    
     // Setup : instruct stepper motors to move
     // Find the stepper with the more steps, it's the one the speed calculations will want to follow
     this->main_stepper= nullptr;
     if( block->steps[ALPHA_STEPPER] > 0 ) {
-        THEKERNEL->robot->alpha_stepper_motor->move( block->direction_bits[ALPHA_STEPPER], block->steps[ALPHA_STEPPER])->set_moved_last_block(true);
+        THEKERNEL->robot->alpha_stepper_motor->move( block->direction_bits[ALPHA_STEPPER], block->steps[ALPHA_STEPPER]);
+        THEKERNEL->robot->alpha_stepper_motor->set_keep_moving(keep_moving);
         this->main_stepper = THEKERNEL->robot->alpha_stepper_motor;
-    }else{
-        THEKERNEL->robot->alpha_stepper_motor->set_moved_last_block(false);
+    }
+    else
+    {
+        THEKERNEL->robot->alpha_stepper_motor->move(0, 0);
     }
 
     if( block->steps[BETA_STEPPER ] > 0 ) {
-        THEKERNEL->robot->beta_stepper_motor->move(  block->direction_bits[BETA_STEPPER], block->steps[BETA_STEPPER ])->set_moved_last_block(true);
+        THEKERNEL->robot->beta_stepper_motor->move(  block->direction_bits[BETA_STEPPER], block->steps[BETA_STEPPER ]);
+        THEKERNEL->robot->beta_stepper_motor->set_keep_moving(keep_moving);
         if(this->main_stepper == nullptr || THEKERNEL->robot->beta_stepper_motor->get_steps_to_move() > this->main_stepper->get_steps_to_move())
             this->main_stepper = THEKERNEL->robot->beta_stepper_motor;
-    }else{
-        THEKERNEL->robot->beta_stepper_motor->set_moved_last_block(false);
+    }
+    else
+    {
+        THEKERNEL->robot->beta_stepper_motor->move(0, 0);
     }
 
     if( block->steps[GAMMA_STEPPER] > 0 ) {
-        THEKERNEL->robot->gamma_stepper_motor->move( block->direction_bits[GAMMA_STEPPER], block->steps[GAMMA_STEPPER])->set_moved_last_block(true);
+        THEKERNEL->robot->gamma_stepper_motor->move( block->direction_bits[GAMMA_STEPPER], block->steps[GAMMA_STEPPER]);
+        THEKERNEL->robot->gamma_stepper_motor->set_keep_moving(keep_moving);
         if(this->main_stepper == nullptr || THEKERNEL->robot->gamma_stepper_motor->get_steps_to_move() > this->main_stepper->get_steps_to_move())
             this->main_stepper = THEKERNEL->robot->gamma_stepper_motor;
-    }else{
-        THEKERNEL->robot->gamma_stepper_motor->set_moved_last_block(false);
+    }
+    else
+    {
+        THEKERNEL->robot->gamma_stepper_motor->move(0, 0);
     }
 
     this->current_block = block;
@@ -213,8 +222,8 @@ void Stepper::on_block_end(void *argument)
 // When a stepper motor has finished it's assigned movement
 uint32_t Stepper::stepper_motor_finished_move(uint32_t dummy)
 {
-    // We care only if none is still moving
-    if( THEKERNEL->robot->alpha_stepper_motor->moving || THEKERNEL->robot->beta_stepper_motor->moving || THEKERNEL->robot->gamma_stepper_motor->moving ) {
+    // We care only if all motors are finished
+    if (!(THEKERNEL->robot->alpha_stepper_motor->is_move_finished && THEKERNEL->robot->beta_stepper_motor->is_move_finished && THEKERNEL->robot->gamma_stepper_motor->is_move_finished)) {
         return 0;
     }
 
@@ -222,76 +231,154 @@ uint32_t Stepper::stepper_motor_finished_move(uint32_t dummy)
     if( this->current_block != NULL ) {
         this->current_block->release();
     }
-
+    
     return 0;
 }
 
+static uint32_t saturating_sub(uint32_t x, uint32_t y)
+{
+    if (x > y)
+        return x - y;
+    else
+        return 0;
+}
+
+uint32_t Stepper::get_stepper_rate(uint32_t stepped, uint32_t steps_to_move, uint32_t old_rate)
+{
+    if (this->previous_main_pos >= this->main_stepper->steps_to_move)
+    {
+        // Main stepper has already finished, hopefully we have only 1 step left.
+        return old_rate;
+    }
+    
+    if (stepped > steps_to_move)
+    {
+        // Already finished our move, keep current rate to avoid jerks.
+        return old_rate;
+    }
+    
+    // Compute the time (seconds) the main stepper would take to finish at current rate:
+    //   main_time = (main_steps_to_move - previous_main_pos) / previous_main_rate
+    // Then compute our speed so that we finish at the same time:
+    //   my_rate = (steps_to_move - stepped) / main_time
+    // Converting to integer-friendly math:
+    //   my_rate = (steps_to_move - stepped) * previous_main_rate / (main_steps_to_move - previous_main_pos)
+    uint64_t rate = (uint64_t)(steps_to_move - stepped) * this->previous_main_rate;
+    uint32_t divider = this->main_stepper->steps_to_move - this->previous_main_pos;
+    rate = (rate + divider / 2) / divider;
+    return rate;
+}
+
+float Stepper::get_speed_factor()
+{
+    return ((float)previous_main_rate) / current_block->nominal_rate;
+}
+
+// Calculate step rate at position x, when it should be v1 at x1 and v2 at x2.
+// V as function of X follows a sqrt() shaped curve, so by squaring v1 and v2,
+// we can use linear interpolation.
+static int quadratic_interpolate(float x, float x1, float v1, float x2, float v2)
+{
+    if (x <= x1)
+        return v1;
+    else if (x >= x2)
+        return v2;
+    
+    float y1 = v1 * v1;
+    float y2 = v2 * v2;
+    float y = (y2 - y1) * (x - x1) / (x2 - x1) + y1;
+    return sqrtf(y);
+}
 
 // This is called ACCELERATION_TICKS_PER_SECOND times per second by the step_event
 // interrupt. It can be assumed that the trapezoid-generator-parameters and the
 // current_block stays untouched by outside handlers for the duration of this function call.
-// NOTE caled at the same priority as PendSV so it may make that longer but it is better that having htis pre empted by pendsv
 void Stepper::trapezoid_generator_tick(void)
 {
     // Do not do the accel math for nothing
-    if(this->current_block && !this->paused && this->main_stepper->moving ) {
-
-        // Store this here because we use it a lot down there
-        uint32_t current_steps_completed = this->main_stepper->stepped;
-        float last_rate= trapezoid_adjusted_rate;
-
-        if( this->force_speed_update ) {
-            // Do not accel, just set the value
-            this->force_speed_update = false;
-            last_rate= -1;
-
-        } else if(THEKERNEL->conveyor->is_flushing()) {
-            // if we are flushing the queue, decelerate to 0 then finish this block
-            if (trapezoid_adjusted_rate > current_block->rate_delta * 1.5F) {
-                trapezoid_adjusted_rate -= current_block->rate_delta;
-
-            } else if (trapezoid_adjusted_rate == current_block->rate_delta * 0.5F) {
+    if(this->current_block && !this->paused && this->main_stepper->moving )
+    {
+        // Calculate what the main stepper speed should be (in steps per second).
+        // All other motors follow the rate of the main stepper.
+        uint32_t main_rate = this->previous_main_rate;
+        uint32_t min_rate = current_block->rate_delta / 2;
+        uint32_t current_pos = this->main_stepper->stepped;
+        
+        if (THEKERNEL->conveyor->is_flushing())
+        {
+            // Abort in progress, slow down and stop.
+            if (main_rate > min_rate)
+            {
+                main_rate = saturating_sub(main_rate, current_block->rate_delta);
+            }
+            else
+            {
                 for (auto i : THEKERNEL->robot->actuators) i->move(i->direction, 0); // stop motors
-                if (current_block) current_block->release();
+                current_block->release();
+                current_block = NULL;
                 THEKERNEL->call_event(ON_SPEED_CHANGE, 0); // tell others we stopped
                 return;
-
-            } else {
-                trapezoid_adjusted_rate = current_block->rate_delta * 0.5F;
             }
-
-        } else if(current_steps_completed <= this->current_block->accelerate_until) {
-            // If we are accelerating
-            // Increase speed
-            this->trapezoid_adjusted_rate += this->current_block->rate_delta;
-            if (this->trapezoid_adjusted_rate > this->current_block->nominal_rate ) {
-                this->trapezoid_adjusted_rate = this->current_block->nominal_rate;
-            }
-
-        } else if (current_steps_completed > this->current_block->decelerate_after) {
-            // If we are decelerating
-            // Reduce speed
-            // NOTE: We will only reduce speed if the result will be > 0. This catches small
-            // rounding errors that might leave steps hanging after the last trapezoid tick.
-            if(this->trapezoid_adjusted_rate > this->current_block->rate_delta * 1.5F) {
-                this->trapezoid_adjusted_rate -= this->current_block->rate_delta;
-            } else {
-                this->trapezoid_adjusted_rate = this->current_block->rate_delta * 1.5F;
-            }
-            if(this->trapezoid_adjusted_rate < this->current_block->final_rate ) {
-                this->trapezoid_adjusted_rate = this->current_block->final_rate;
-            }
-
-        } else if (trapezoid_adjusted_rate != current_block->nominal_rate) {
-            // If we are cruising
-            // Make sure we cruise at exactly nominal rate
-            this->trapezoid_adjusted_rate = this->current_block->nominal_rate;
         }
-
-        if(last_rate != trapezoid_adjusted_rate) {
-            // don't call this if speed did not change
-            this->set_step_events_per_second(this->trapezoid_adjusted_rate);
+        else if (current_pos >= this->current_block->steps_event_count)
+        {
+            // Block is changing now, decelerate until the new move activates.
+            main_rate = saturating_sub(main_rate, current_block->rate_delta);
         }
+        else if (current_pos < this->current_block->accelerate_until)
+        {
+            // Beginning of move, accelerate
+            uint32_t initial_rate = std::max((uint32_t)current_block->initial_rate, min_rate);
+            main_rate = quadratic_interpolate(current_pos, 0, initial_rate,
+                                             this->current_block->accelerate_until, current_block->max_rate);
+        }
+        else if (current_pos >= this->current_block->decelerate_after)
+        {
+            // End of move, decelerate.
+            // Calculate desired speed at the end of the next acceleration interval.
+            uint32_t end_pos = current_pos + main_rate / THEKERNEL->acceleration_ticks_per_second;
+            uint32_t final_rate = std::max((uint32_t)current_block->final_rate, min_rate);
+            main_rate = quadratic_interpolate(end_pos, this->current_block->decelerate_after, current_block->max_rate,
+                                              this->current_block->steps_event_count, final_rate);
+        }
+        else
+        {
+            // Middle of move, cruise at specified speed
+            main_rate = current_block->nominal_rate;
+        }
+        
+        // Never decelerate fully to 0. Because acceleration tick happens separately, we may still
+        // have a few steps to make before the move is finished. It should be safe to stop immediately
+        // from min_rate to 0 when the move ends.
+        if (main_rate < min_rate)
+            main_rate = min_rate;
+        
+        this->previous_main_rate = main_rate;
+        this->previous_main_pos = current_pos;
+        
+        this->main_stepper->set_rate(main_rate);
+        
+        // Now calculate the rates for all other steppers based on the main stepper
+        // Note: this has to be recalculated even if speed didn't change, so that accumulating 
+        // rounding errors can be eliminated.
+        StepperMotor *alpha = THEKERNEL->robot->alpha_stepper_motor;
+        StepperMotor *beta  = THEKERNEL->robot->beta_stepper_motor;
+        StepperMotor *gamma = THEKERNEL->robot->gamma_stepper_motor;
+        if (alpha->moving && this->main_stepper != alpha)
+        {
+            alpha->set_rate(get_stepper_rate(alpha->stepped, alpha->steps_to_move, alpha->get_rate()));
+        }
+        if (beta->moving && this->main_stepper != beta)
+        {
+            beta->set_rate(get_stepper_rate(beta->stepped, beta->steps_to_move, beta->get_rate()));
+        }
+        if (gamma->moving && this->main_stepper != gamma)
+        {
+            gamma->set_rate(get_stepper_rate(gamma->stepped, gamma->steps_to_move, gamma->get_rate()));
+        }
+        
+        // Other modules might want to know the speed changed
+        THEKERNEL->call_event(ON_SPEED_CHANGE, this);
     }
 }
 
@@ -299,28 +386,8 @@ void Stepper::trapezoid_generator_tick(void)
 // block begins.
 inline void Stepper::trapezoid_generator_reset()
 {
-    this->trapezoid_adjusted_rate = this->current_block->initial_rate;
-    this->force_speed_update = true;
-}
-
-// Update the speed for all steppers
-void Stepper::set_step_events_per_second( float steps_per_second )
-{
-    float isps= steps_per_second / this->current_block->steps_event_count;
-
-    // Instruct the stepper motors
-    if( THEKERNEL->robot->alpha_stepper_motor->moving ) {
-        THEKERNEL->robot->alpha_stepper_motor->set_speed(isps * this->current_block->steps[ALPHA_STEPPER]);
-    }
-    if( THEKERNEL->robot->beta_stepper_motor->moving  ) {
-        THEKERNEL->robot->beta_stepper_motor->set_speed(isps * this->current_block->steps[BETA_STEPPER]);
-    }
-    if( THEKERNEL->robot->gamma_stepper_motor->moving ) {
-        THEKERNEL->robot->gamma_stepper_motor->set_speed(isps * this->current_block->steps[GAMMA_STEPPER]);
-    }
-
-    // Other modules might want to know the speed changed
-    THEKERNEL->call_event(ON_SPEED_CHANGE, this);
+    this->previous_main_rate = this->current_block->initial_rate;
+    this->previous_main_pos = 0;
 }
 
 

@@ -494,7 +494,6 @@ void Extruder::on_block_begin(void *argument)
 
     if( this->mode == OFF ) {
         this->current_block = NULL;
-        this->stepper_motor->set_moved_last_block(false);
         return;
     }
 
@@ -525,17 +524,14 @@ void Extruder::on_block_begin(void *argument)
 
         if(this->mode == FOLLOW) {
             on_speed_change(this); // set initial speed
-            this->stepper_motor->set_moved_last_block(true);
         }else{
             // SOLO
-            this->stepper_motor->set_speed(rate_increase());  // start at first acceleration step
-            this->stepper_motor->set_moved_last_block(false);
+            this->stepper_motor->set_rate(rate_increase());  // start at first acceleration step
         }
 
     } else {
         // no steps to take this time
         this->current_block = NULL;
-        this->stepper_motor->set_moved_last_block(false);
     }
 
 }
@@ -566,7 +562,7 @@ void Extruder::acceleration_tick(void)
     if( current_rate < target_rate ) {
         current_rate = min( target_rate, current_rate + rate_increase() );
         // steps per second
-        this->stepper_motor->set_speed(current_rate);
+        this->stepper_motor->set_rate(current_rate);
     }
 
     return;
@@ -589,16 +585,8 @@ void Extruder::on_speed_change( void *argument )
         return;
     }
 
-    /*
-    * nominal block duration = current block's steps / ( current block's nominal rate )
-    * nominal extruder rate = extruder steps / nominal block duration
-    * actual extruder rate = nominal extruder rate * ( ( stepper's steps per second ) / ( current block's nominal rate ) )
-    * or actual extruder rate = ( ( extruder steps * ( current block's nominal_rate ) ) / current block's steps ) * ( ( stepper's steps per second ) / ( current block's nominal rate ) )
-    * or simplified : extruder steps * ( stepper's steps per second ) ) / current block's steps
-    * or even : ( stepper steps per second ) * ( extruder steps / current block's steps )
-    */
-
-    this->stepper_motor->set_speed(THEKERNEL->stepper->get_trapezoid_adjusted_rate() * (float)this->stepper_motor->get_steps_to_move() / (float)this->current_block->steps_event_count);
+    // Keep the stepper speed in sync with the main stepper, all should finish the move at the same time.
+    this->stepper_motor->set_rate(THEKERNEL->stepper->get_stepper_rate(this->stepper_motor->get_stepped(), this->stepper_motor->get_steps_to_move(), this->stepper_motor->get_rate()));
 }
 
 // When the stepper has finished it's move

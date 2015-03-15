@@ -76,9 +76,9 @@ void StepTicker::start() {
 }
 
 // Set the base stepping frequency
-void StepTicker::set_frequency( float frequency ){
-    this->frequency = frequency;
-    this->period = floorf((SystemCoreClock/4.0F)/frequency);  // SystemCoreClock/4 = Timer increments in a second
+void StepTicker::set_frequency( uint32_t frequency ){
+    this->period = (SystemCoreClock/4)/frequency;  // SystemCoreClock/4 = Timer increments in a second
+    this->frequency = (SystemCoreClock/4)/this->period; // Get the actual frequency from period
     LPC_TIM0->MR0 = this->period;
     if( LPC_TIM0->TC > LPC_TIM0->MR0 ){
         LPC_TIM0->TCR = 3;  // Reset
@@ -121,13 +121,6 @@ void StepTicker::signal_a_move_finished(){
      for (int motor = 0; motor < num_motors; motor++){
         if (this->active_motor[motor] && this->motor[motor]->is_move_finished){
             this->motor[motor]->signal_move_finished();
-                // Theoretically this does nothing and the reason for it is currently unknown and/or forgotten
-                // if(this->motor[motor]->moving == false){
-                //     if (motor > 0){
-                //         motor--;
-                //         bitmask >>= 1;
-                //     }
-                // }
         }
     }
 }
@@ -191,10 +184,11 @@ void StepTicker::TIMER0_IRQHandler (void){
     LPC_TIM0->IR |= 1 << 0;
     tick_cnt++; // count number of ticks
 
+    uint32_t freq = this->frequency;
     // Step pins NOTE takes 1.2us when nothing to step, 1.8-2us for one motor stepped and 2.6us when two motors stepped, 3.167us when three motors stepped
     for (uint32_t motor = 0; motor < num_motors; motor++){
         // send tick to all active motors
-        if(this->active_motor[motor] && this->motor[motor]->tick()){
+        if(this->active_motor[motor] && this->motor[motor]->tick(freq)){
             // we stepped so schedule an unstep
             this->unstep[motor]= 1;
         }

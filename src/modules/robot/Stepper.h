@@ -36,17 +36,24 @@ public:
     void turn_enable_pins_on();
     void turn_enable_pins_off();
 
-    float get_trapezoid_adjusted_rate() const { return trapezoid_adjusted_rate; }
     const Block *get_current_block() const { return current_block; }
 
+    // Get the acceleration-based step speed (steps per second) for a given stepper.
+    // Computed based on the main stepper rate so that all steppers finish move at
+    // the same time.
+    uint32_t get_stepper_rate(uint32_t stepped, uint32_t steps_to_move, uint32_t old_rate);
+    
+    // Get the ratio between current speed and the nominal speed for this move.
+    float get_speed_factor();
+    
 private:
     Block *current_block;
-    float trapezoid_adjusted_rate;
     StepperMotor *main_stepper;
+    uint32_t previous_main_rate;
+    uint32_t previous_main_pos;
 
     struct {
         bool enable_pins_status:1;
-        bool force_speed_update:1;
         bool paused:1;
         bool halted:1;
     };

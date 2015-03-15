@@ -24,14 +24,14 @@ class StepTicker{
 
         StepTicker();
         ~StepTicker();
-        void set_frequency( float frequency );
+        void set_frequency( uint32_t frequency );
         void signal_a_move_finished();
         void set_reset_delay( float seconds );
         int register_motor(StepperMotor* motor);
         void add_motor_to_active_list(StepperMotor* motor);
         void remove_motor_from_active_list(StepperMotor* motor);
         void set_acceleration_ticks_per_second(uint32_t acceleration_ticks_per_second);
-        float get_frequency() const { return frequency; }
+        uint32_t get_frequency() const { return frequency; }
         void unstep_tick();
         uint32_t get_tick_cnt() const { return tick_cnt; }
         uint32_t ticks_since(uint32_t last) const { return (tick_cnt>=last) ? tick_cnt-last : (UINT32_MAX-last) + tick_cnt + 1; }
@@ -49,7 +49,7 @@ class StepTicker{
         friend class StepperMotor;
 
     private:
-        float frequency;
+        uint32_t frequency;
         uint32_t period;
         volatile uint32_t tick_cnt;
         std::vector<std::function<void(void)>> acceleration_tick_handlers;

@@ -557,11 +557,6 @@ void Endstops::do_homing_corexy(char axes_to_move)
 
 void Endstops::home(char axes_to_move)
 {
-    // not a block move so disable the last tick setting
-    for ( int c = X_AXIS; c <= Z_AXIS; c++ ) {
-        STEPPER[c]->set_moved_last_block(false);
-    }
-
     if (is_corexy){
         // corexy/HBot homing
         do_homing_corexy(axes_to_move);
@@ -758,7 +753,7 @@ void Endstops::acceleration_tick(void)
         if( current_rate > target_rate ){ current_rate = target_rate; }
 
         // steps per second
-        STEPPER[c]->set_speed(current_rate);
+        STEPPER[c]->set_rate(current_rate);
     }
 
     return;

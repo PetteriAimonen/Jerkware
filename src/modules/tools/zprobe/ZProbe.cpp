@@ -169,11 +169,6 @@ bool ZProbe::wait_for_probe(int& steps)
 // single probe and report amount moved
 bool ZProbe::run_probe(int& steps, bool fast)
 {
-    // not a block move so disable the last tick setting
-    for ( int c = X_AXIS; c <= Z_AXIS; c++ ) {
-        STEPPER[c]->set_moved_last_block(false);
-    }
-
     // Enable the motors
     THEKERNEL->stepper->turn_enable_pins_on();
     this->current_feedrate = (fast ? this->fast_feedrate : this->slow_feedrate) * Z_STEPS_PER_MM; // steps/sec
@@ -338,7 +333,7 @@ void ZProbe::accelerate(int c)
     }
 
     // steps per second
-    STEPPER[c]->set_speed(current_rate);
+    STEPPER[c]->set_rate(current_rate);
 }
 
 // issue a coordinated move directly to robot, and return when done

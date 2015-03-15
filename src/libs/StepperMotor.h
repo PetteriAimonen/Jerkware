@@ -12,6 +12,8 @@
 #include "Pin.h"
 #include <atomic>
 #include <functional>
+#include "Kernel.h"
+#include "StepTicker.h"
 
 class StepTicker;
 class Hook;
@@ -29,15 +31,13 @@ class StepperMotor {
 
         bool is_moving() { return moving; }
         void move_finished();
-        StepperMotor* move( bool direction, unsigned int steps, float initial_speed= -1.0F);
+        StepperMotor* move( bool direction, unsigned int steps, uint32_t initial_rate = 0);
         void signal_move_finished();
-        StepperMotor* set_speed( float speed );
-        void set_moved_last_block(bool flg) { last_step_tick_valid= flg; }
         void update_exit_tick();
         void pause();
         void unpause();
 
-        float get_steps_per_second()  const { return steps_per_second; }
+        uint32_t get_steps_per_second()  const { return steps_per_second; }
         float get_steps_per_mm()  const { return steps_per_mm; }
         void change_steps_per_mm(float);
         void change_last_milestone(float);
@@ -45,13 +45,15 @@ class StepperMotor {
         float get_current_position(void) const { return (float)current_position_steps/steps_per_mm; }
         float get_max_rate(void) const { return max_rate; }
         void set_max_rate(float mr) { max_rate= mr; }
-        float get_min_rate(void) const { return minimum_step_rate; }
-        void set_min_rate(float mr) { minimum_step_rate= mr; }
+        void set_keep_moving(bool keep_moving) { this->keep_moving = keep_moving; }
 
         int  steps_to_target(float);
         uint32_t get_steps_to_move() const { return steps_to_move; }
         uint32_t get_stepped() const { return stepped; }
 
+        StepperMotor* set_rate( uint32_t rate );
+        inline uint32_t get_rate() const { return steps_per_second; }
+        
         template<typename T> void attach( T *optr, uint32_t ( T::*fptr )( uint32_t ) ){
             Hook* hook = new Hook();
             hook->attach(optr, fptr);
@@ -73,11 +75,10 @@ class StepperMotor {
         Pin dir_pin;
         Pin en_pin;
 
-        float steps_per_second;
+        uint32_t steps_per_second;
         float steps_per_mm;
         float max_rate; // this is not really rate it is in mm/sec, misnamed used in Robot and Extruder
-        float minimum_step_rate; // this is the minimum step_rate in steps/sec for this motor for this block
-        static float default_minimum_actuator_rate;
+        static uint32_t default_minimum_actuator_rate;
 
         volatile int32_t current_position_steps;
         int32_t last_milestone_steps;
@@ -85,33 +86,29 @@ class StepperMotor {
 
         uint32_t steps_to_move;
         uint32_t stepped;
-        uint32_t last_step_tick;
         uint32_t signal_step;
 
-        // set to 32 bit fixed point, 18:14 bits fractional
-        static const uint32_t fx_shift= 14;
-        static const uint32_t fx_increment= ((uint32_t)1<<fx_shift);
-        uint32_t fx_counter;
-        uint32_t fx_ticks_per_step;
-
+        uint32_t tickcount;
+        
         struct {
             bool direction:1;
             volatile bool is_move_finished:1; // Whether the move just finished
             bool paused:1;
             volatile bool moving:1;
-            bool last_step_tick_valid:1; // set if the last step tick time is valid (ie the motor moved last block)
+            volatile bool keep_moving:1;
         };
 
         // Called a great many times per second, to step if we have to now
-        inline bool tick() {
-            // increase the ( 32 fixed point 18:14 ) counter by one tick 11t
-            fx_counter += fx_increment;
-
-            // if we are to step now
-            if (fx_counter >= fx_ticks_per_step){
+        inline bool tick(uint32_t frequency) {
+            tickcount += steps_per_second;
+            
+            if (tickcount > frequency)
+            {
+                tickcount -= frequency;
                 step();
                 return true;
             }
+            
             return false;
         };
 };
